@@ -1,95 +1,84 @@
-АННОТАЦИЯ
+# Аннотация проекта: URL Shortener на Kubernetes
 
-В этой сессии пользователя обучали базовым концепциям Kubernetes на практике, начиная от простого и постепенно переходя к более сложному. В качестве учебного проекта был создан небольшой web-сервис на FastAPI, упакованный в Docker и развёрнутый в локальном кластере Kubernetes (Kubernetes внутри Docker Desktop на macOS).
+## Описание
+Полный учебный цикл: Python FastAPI сервис → Docker → Kubernetes (Docker Desktop, macOS).
+Проект строился пошагово — от локального запуска до многокомпонентного K8s-деплоя с
+автоскейлингом, персистентным хранилищем и отдельным фронтендом.
 
-Пользователь:
-- создал структуру проекта (app/ + k8s/),
-- написал минимальное FastAPI-приложение (main.py),
-- подготовил Dockerfile с uvicorn как ASGI-сервером,
-- собрал и протестировал Docker-образ локально,
-- включил встроенный Kubernetes в Docker Desktop и устранил проблемы подключения (EOF),
-- описал Deployment для 3 реплик приложения,
-- описал Service (ClusterIP), который по label’ам находит поды и прокидывает на них трафик,
-- отладил типичную проблему ImagePullBackOff, поняв связь image, imagePullPolicy и локальных образов,
-- использовал kubectl port-forward для доступа к приложению через Service,
-- установил nginx Ingress Controller,
-- описал и применил Ingress-ресурс, настроив маршрут host/path → Service,
-- проверил конечный доступ к приложению через http://kubernetes.docker.internal/ и убедился, что ответ идёт из pod’ов Kubernetes (по полю hostname).
+## Автор
+Уверенный Python/ML-разработчик, осваивает DevOps и Kubernetes.
 
-Особый акцент делался на:
-- чётком разделении ролей Deployment, Service и Ingress;
-- понимании label/selector как основного механизма связи объектов;
-- работе с портами (containerPort, targetPort, port);
-- типичных ошибках (ImagePullBackOff) и их причинах;
-- пошаговой связи Docker → Kubernetes (образ → pod → Service → Ingress).
+---
 
+## Этапы и что изучено
 
-КРАТКИЙ УЧЕБНЫЙ ПЛАН ДЛЯ ПРОДОЛЖЕНИЯ
+### Этап 1 — FastAPI приложение
+- Структура FastAPI: router, dependencies, Pydantic schemas, SQLAlchemy
+- CRUD для SQLite: create_link, get_link_by_code, increment_hits, delete_link
+- **Урок:** порядок регистрации маршрутов в FastAPI критичен.
+  `/{code}` должен быть ПОСЛЕДНИМ — иначе "съедает" `/links`, `/health` и т.д.
 
-Уровень: уверенный разработчик с опытом Python/ML, начальный/средний уровень в DevOps и Kubernetes.
+### Этап 2 — Docker + Kubernetes базовый деплой
+- Dockerfile: многослойная сборка, requirements.txt отдельным слоем от кода
+- **Урок:** `docker build --no-cache` — когда Docker кешировал старый слой с неполным кодом
+- PVC (PersistentVolumeClaim): SQLite на томе, данные переживают рестарт подов
+- ConfigMap: несекретные настройки (BASE_URL, APP_NAME) в переменных окружения
+- Secret: создавать через `kubectl create secret generic --from-env-file=.env`,
+  НЕ хранить значения в secret.yaml (коммитить в git только структуру)
+- Readiness/Liveness Probes: K8s не шлёт трафик пока readinessProbe не прошла
+- Resources requests/limits: CPU в миллиядрах (100m = 0.1 core), память в Mi
+- **Урок:** при изменении ConfigMap/Secret поды НЕ рестартуют автоматически.
+  Нужен `kubectl rollout restart deployment/<name>`
+- **Урок:** ошибка "field is immutable" при apply — нужно удалить старый Deployment
+  если изменился spec.selector
 
-1. БАЗОВОЕ УКРЕПЛЕНИЕ (повторение и закрепление)
-   - Повторить: понятия Cluster, Node, Pod, Deployment, Service (ClusterIP).
-   - Практика:
-     - самостоятельно пересоздать Deployment и Service с нуля для другого простого образа;
-     - поэкспериментировать с количеством реплик и наблюдать изменения через kubectl get pods.
-   - Цель: чтобы базовая механика (под → сервис → kubectl port-forward) выполнялась «на автомате».
+### Этап 3 — HPA (Horizontal Pod Autoscaler)
+- metrics-server: обязателен для HPA, в Docker Desktop требует --kubelet-insecure-tls
+- HPA Controller опрашивает metrics-server каждые 15с, регулирует replicas
+- 500/502 под нагрузкой при скейлинге — нормально, окно между "под создан"
+  и "readinessProbe прошла". Лечится агрессивнее настроенными пробами
+- cooldown period ~5 минут — защита от флаппинга при скейлинге вниз
+- **Урок:** для учебного стенда targetCPUUtilization: 30% лучше чем 60%
+  (сервис лёгкий, иначе скейлинг почти не срабатывает)
 
-2. ПРОБЫ ЗДОРОВЬЯ (LIVENESS / READINESS)
-   - Теория: различия между livenessProbe и readinessProbe, зачем они нужны.
-   - Практика:
-     - добавить в FastAPI endpoint `/health`;
-     - прописать HTTP-пробы в deployment.yaml;
-     - смоделировать падение readiness (например, возвращать 500) и посмотреть поведение k8s.
-   - Цель: понять, как Kubernetes решает, когда pod готов к трафику и когда его перезапускать.
+### Этап 4 — Frontend + Path-based Ingress
+- APIRouter с префиксом /api: чистое разделение маршрутов
+- Отдельный nginx pod для статики — правильная архитектура (разделение ответственности)
+- **Урок:** порядок paths в Ingress: /api и /r ВЫШЕ /, иначе все запросы уйдут в nginx
+- **Урок:** port-forward — инструмент разработчика, не продакшн. В продакшне
+  маршрутизация только через Ingress, не через proxy_pass в подах
+- **Урок:** probe path обновляется вместе с кодом! После переноса /health → /api/health
+  нужно обновить deployment.yaml, иначе CrashLoopBackOff
 
-3. РЕСУРСЫ И ЛИМИТЫ
-   - Теория: requests и limits для CPU/памяти, влияние на scheduler и стабильность кластера.
-   - Практика:
-     - добавить в deployment.yaml resources.requests/limits;
-     - сыграть с слишком маленькими/слишком большими значениями и посмотреть на ошибки и планирование.
-   - Цель: сформировать интуицию, как задавать ресурсы под реальные сервисы.
+---
 
-4. АВТОСКЕЙЛИНГ (HPA)
-   - Теория: Horizontal Pod Autoscaler, типичные метрики (CPU, custom metrics).
-   - Практика:
-     - включить metrics-server (если требуется);
-     - создать HPA для web-deployment (минимум 2, максимум 5 реплик, target CPU, например, 60%);
-     - сгенерировать нагрузку (ab/hey/locust) и посмотреть, как меняется количество pod’ов.
-   - Цель: увидеть живой фидбек-loop «нагрузка → скейл → снижение нагрузки → дескейл».
+## Диагностические команды (шпаргалка)
 
-5. ХРАНЕНИЕ ДАННЫХ (PVC + STATEFUL)
-   - Теория: различие между Deployment и StatefulSet, PersistentVolume и PersistentVolumeClaim.
-   - Практика:
-     - добавить PVC и примонтировать его в FastAPI-поды для хранения файлов/логов;
-     - убедиться, что данные сохраняются при перезапуске pod’ов и rolling updates.
-   - Цель: понять работу со stateful-нагрузкой в k8s.
+```bash
+kubectl get pods,svc,ingress,hpa,pvc    # общее состояние
+kubectl describe pod <name>              # детали + события пода
+kubectl logs <pod> --previous            # логи упавшего пода
+kubectl get endpoints                    # видит ли Service поды?
+kubectl top pods                         # CPU/RAM (нужен metrics-server)
+kubectl rollout restart deployment/<n>   # рестарт без даунтайма
+kubectl rollout status deployment/<n>    # прогресс rolling update
+```
 
-6. КОНФИГУРАЦИЯ И СЕКРЕТЫ (CONFIGMAP / SECRET)
-   - Теория: ConfigMap для конфигов, Secret для чувствительных данных.
-   - Практика:
-     - вынести часть настроек (например, текст сообщения или флаг режима) в ConfigMap;
-     - добавить секрет (фейковый API ключ) и использовать его как переменную окружения в контейнере.
-   - Цель: научиться разделять код и конфигурацию.
+## Типичные ошибки и решения
 
-7. БОЛЕЕ СЛОЖНЫЙ INGRESS
-   - Теория: path-based и host-based routing, несколько сервисов за одним ingress.
-   - Практика:
-     - добавить второй сервис в кластер (например, /info);
-     - настроить Ingress на маршрутизацию `/api` → web-service, `/info` → другой сервис.
-   - Цель: почувствовать Ingress как простой, но мощный «роутер» HTTP-трафика.
+| Симптом | Причина | Решение |
+|---------|---------|---------|
+| ImagePullBackOff | Образ не найден в registry | imagePullPolicy: Never для локальных образов |
+| CrashLoopBackOff | Probe путь не совпадает с кодом | Обновить path в deployment.yaml |
+| Endpoints пустой | selector в Service ≠ labels на подах | Проверить labels, rollout restart |
+| 404 на /links | Порядок маршрутов в FastAPI | Конкретные пути выше /{code} |
+| 502 Bad Gateway | Под не прошёл readinessProbe | kubectl logs --previous, исправить probe |
+| Secret не обновился | Поды не рестартовали | kubectl rollout restart |
+| "field is immutable" | Изменился spec.selector | kubectl delete + apply deployment |
 
-8. CI/CD (БАЗОВЫЙ)
-   - Теория: pipeline от git push до обновлённого деплоя в кластере.
-   - Практика:
-     - создать GitHub Actions workflow:
-       - сборка Docker-образа;
-       - пуш в registry;
-       - автоматическое обновление Deployment через kubectl apply или kubectl set image.
-   - Цель: увидеть, как код из репозитория автоматически попадает в кластер.
-
-Для нового LLM важные входные артефакты:
-- структура репозитория (описана в README),
-- YAML-файлы (deployment.yaml, service.yaml, ingress.yaml),
-- Dockerfile и main.py,
-- текущий уровень пользователя: уверенно читает YAML, понимает Deployment/Service/Ingress, умеет собирать и запускать образ, готов углубляться в HPA, PVC и пробы.
+## Следующие шаги
+- Cloudflare Tunnel — публичный доступ без ngrok
+- CI/CD — GitHub Actions: build → push → kubectl apply
+- Облачный K8s — DigitalOcean / GKE / Oracle Cloud (бесплатно)
+- PostgreSQL — замена SQLite для multi-node кластера
+- Prometheus + Grafana — мониторинг и алерты
