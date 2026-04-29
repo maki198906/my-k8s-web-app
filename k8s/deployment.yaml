@@ -1,20 +1,79 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: web-deployment
+  name: url-shortener
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: web
+      app: url-shortener
   template:
     metadata:
       labels:
-        app: web
+        app: url-shortener
     spec:
       containers:
         - name: web
-          image: my-k8s-web-app:v1
-          imagePullPolicy: IfNotPresent
+          image: url-shortener:v1
+          imagePullPolicy: Never       # используем локальный образ (Docker Desktop)
           ports:
             - containerPort: 8080
+
+          # ── Переменные окружения из ConfigMap и Secret ──────────
+          env:
+            - name: BASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: shortener-config
+                  key: BASE_URL
+            - name: APP_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: shortener-config
+                  key: APP_NAME
+            - name: APP_VERSION
+              valueFrom:
+                configMapKeyRef:
+                  name: shortener-config
+                  key: APP_VERSION
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: shortener-secret
+                  key: ADMIN_TOKEN
+
+          # ── Монтирование тома ────────────────────────────────────
+          volumeMounts:
+            - name: data-volume
+              mountPath: /data          # папка внутри контейнера
+
+          # ── Пробы здоровья ───────────────────────────────────────
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 3     # подождать 5с после старта
+            periodSeconds: 5  
+            failureThreshold: 2
+            successThreshold: 1        # проверять каждые 10с
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+
+          # ── Ресурсы ──────────────────────────────────────────────
+          resources:
+            requests:
+              cpu: "100m"              # 0.1 ядра CPU минимум
+              memory: "64Mi"           # 64 МБ памяти минимум
+            limits:
+              cpu: "250m"              # не более 0.25 ядра
+              memory: "128Mi"          # не более 128 МБ
+
+      # ── Том подключается к PVC ───────────────────────────────────
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: shortener-pvc

@@ -1,19 +1,35 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: web-ingress
+  name: shortener-ingress
   annotations:
-    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/use-regex: "true"
 spec:
   ingressClassName: nginx
   rules:
     - host: kubernetes.docker.internal
       http:
         paths:
+          # Сначала конкретные пути — потом общий /
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: shortener-service
+                port:
+                  number: 80
+          - path: /r
+            pathType: Prefix
+            backend:
+              service:
+                name: shortener-service
+                port:
+                  number: 80
+          # Всё остальное → nginx (UI)
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: web-service
+                name: frontend-service
                 port:
                   number: 80

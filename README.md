@@ -1,228 +1,202 @@
-# My K8s Web App (FastAPI + Kubernetes)
+# 🔗 URL Shortener на Kubernetes
 
-Небольшое учебное приложение на FastAPI, упакованное в Docker и развёрнутое в локальном кластере Kubernetes (Kubernetes из Docker Desktop на macOS).
+Учебный проект: полный цикл от Python-сервиса до продакшн-ready деплоя в Kubernetes.
 
-Цель репозитория — показать базовый путь:
+## Стек
 
-**исходный код → Docker‑образ → Deployment → Service → Ingress → HTTP‑запрос из браузера.**
+| Слой | Технологии |
+|------|-----------|
+| Backend | Python 3.11, FastAPI, SQLAlchemy, SQLite |
+| Frontend | HTML/CSS/JS, nginx:alpine |
+| Контейнеризация | Docker |
+| Оркестрация | Kubernetes (Docker Desktop) |
+| Балансировка | nginx Ingress Controller |
+| Автоскейлинг | HPA + metrics-server |
 
----
+## Архитектура
+
+```
+Browser
+    │
+    ▼
+Ingress Controller (nginx)
+    │
+    ├─ /api/*  ──→  shortener-service  ──→  FastAPI pods (x2-6)
+    ├─ /r/*    ──→  shortener-service  ──→  FastAPI pods
+    └─ /*      ──→  frontend-service   ──→  nginx pod (UI)
+                                               │
+                                          PVC (SQLite)
+```
 
 ## Структура проекта
 
-```text
+```
 my-k8s-web-app/
-├─ app/
-│  ├─ main.py        # FastAPI-приложение
-│  └─ Dockerfile     # Образ с Python + FastAPI + uvicorn
-│
-├─ k8s/
-│  ├─ deployment.yaml  # Deployment с 3 репликами
-│  ├─ service.yaml     # ClusterIP Service для доступа к подам
-│  └─ ingress.yaml     # Ingress (nginx) для внешнего HTTP-доступа
-│
-├─ .gitignore
-└─ README.md
+├── app/                        # FastAPI backend
+│   ├── main.py                 # Эндпоинты + APIRouter
+│   ├── config.py               # Конфигурация из env
+│   ├── database.py             # SQLAlchemy engine + session
+│   ├── models.py               # ORM модели
+│   ├── schemas.py              # Pydantic схемы
+│   ├── crud.py                 # CRUD операции
+│   ├── requirements.txt
+│   └── Dockerfile
+├── frontend/                   # nginx + static UI
+│   ├── index.html              # SPA: сокращение, статистика, admin
+│   ├── nginx.conf
+│   └── Dockerfile
+├── k8s/                        # Kubernetes манифесты
+│   ├── pvc.yaml                # 100Mi том для SQLite
+│   ├── configmap.yaml          # BASE_URL, APP_NAME, APP_VERSION
+│   ├── secret.yaml             # Структура (значения из .env)
+│   ├── deployment.yaml         # 2-6 реплик, probes, resources
+│   ├── service.yaml            # ClusterIP для FastAPI
+│   ├── frontend-deployment.yaml
+│   ├── frontend-service.yaml   # ClusterIP для nginx
+│   ├── ingress.yaml            # Path-based routing
+│   └── hpa.yaml                # Автоскейлинг по CPU (цель 30%)
+└── .env                        # Локальные секреты (в .gitignore!)
 ```
 
----
+## API эндпоинты
 
-## Что делает приложение
+| Метод | Путь | Описание |
+|-------|------|----------|
+| `POST` | `/api/shorten` | Создать короткую ссылку |
+| `GET` | `/r/{code}` | Редирект по коду |
+| `GET` | `/api/stats/{code}` | Статистика ссылки |
+| `GET` | `/api/links` | Все ссылки (admin) |
+| `DELETE` | `/api/links/{code}` | Удалить ссылку (admin) |
+| `GET` | `/api/health` | Health check для K8s probes |
+| `GET` | `/api/info` | Версия + hostname пода |
 
-Приложение — минимальный API на FastAPI с одним endpoint’ом:
+## Быстрый старт
 
-- `GET /` — возвращает JSON с полями `status`, `message` и `hostname`.
+### Требования
 
-`hostname` позволяет увидеть, из какого Pod’а Kubernetes пришёл ответ.
+- Docker Desktop с включённым Kubernetes
+- kubectl
+- metrics-server (для HPA)
 
----
-
-## 1. Локальный Docker‑образ
-
-### Сборка образа
-
-Из корня репозитория:
+### 1. Настройка секретов
 
 ```bash
-cd app
-docker build -t my-k8s-web-app:v1 .
+# Генерируем токен
+openssl rand -hex 32
+
+# Создаём .env
+echo "ADMIN_TOKEN=<сгенерированный_токен>" > .env
+
+# Добавляем в .gitignore
+echo ".env" >> .gitignore
 ```
 
-Образ содержит:
-
-- Python (slim-образ),
-- установленные `fastapi` и `uvicorn`,
-- запуск `uvicorn main:app --host 0.0.0.0 --port 8080`.
-
-### Тест локального контейнера (без Kubernetes)
+### 2. Сборка образов
 
 ```bash
-docker run --rm -p 8080:8080 my-k8s-web-app:v1
+docker build -t url-shortener:v1 ./app
+docker build -t url-shortener-frontend:v1 ./frontend
 ```
 
-Проверка:
-
-- открыть в браузере `http://127.0.0.1:8080/`,
-- увидеть JSON от FastAPI.
-
----
-
-## 2. Локальный кластер Kubernetes (Docker Desktop)
-
-Проект рассчитан на использование **Kubernetes внутри Docker Desktop** на macOS.
-
-Шаги:
-
-1. Открыть Docker Desktop → Settings → Kubernetes.  
-2. Включить `Enable Kubernetes` и дождаться статуса `Running`.  
-3. Проверить:
-
-   ```bash
-   kubectl config current-context
-   kubectl get nodes
-   ```
-
-   Должна быть нода `docker-desktop` в статусе `Ready`.
-
----
-
-## 3. Deployment и Service
-
-### Применение манифестов
-
-Из корня репозитория:
+### 3. Деплой в Kubernetes
 
 ```bash
+# Секрет из .env
+kubectl create secret generic shortener-secret --from-env-file=.env
+
+# Все манифесты
+kubectl apply -f k8s/pvc.yaml
+kubectl apply -f k8s/configmap.yaml
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
-```
-
-Проверка состояния:
-
-```bash
-kubectl get deployments
-kubectl get pods
-kubectl get svc
-```
-
-Ожидается:
-
-- Deployment `web-deployment` с 3 репликами.  
-- Pods `web-deployment-...` в статусе `Running`.  
-- Service `web-service` типа `ClusterIP` с портом `80/TCP`.
-
-### Внутренний доступ через Service
-
-Для локальной отладки можно пользоваться `port-forward`:
-
-```bash
-kubectl port-forward svc/web-service 8080:80
-```
-
-Потом открыть:
-
-```text
-http://127.0.0.1:8080/
-```
-
-и увидеть JSON уже **из Kubernetes** (включая `hostname` пода).
-
----
-
-## 4. Ingress (nginx) и внешний HTTP‑доступ
-
-### Установка nginx Ingress Controller
-
-Один из вариантов для Docker Desktop:
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.2.1/deploy/static/provider/cloud/deploy.yaml
-
-kubectl get pods -n ingress-nginx
-```
-
-Нужно дождаться, пока pod `ingress-nginx-controller-...` будет в статусе `1/1 Running`.
-
-### Применение Ingress
-
-```bash
+kubectl apply -f k8s/frontend-deployment.yaml
+kubectl apply -f k8s/frontend-service.yaml
 kubectl apply -f k8s/ingress.yaml
-kubectl get ingress
+kubectl apply -f k8s/hpa.yaml
+
+# Проверка
+kubectl get pods -w
 ```
 
-Ожидается:
+### 4. Открываем UI
 
-```text
-NAME          CLASS   HOSTS                        ADDRESS     PORTS   AGE
-web-ingress   nginx   kubernetes.docker.internal   localhost   80      ...
+```
+http://kubernetes.docker.internal
 ```
 
-### Доступ через Ingress
-
-Теперь можно зайти:
-
-```text
-http://kubernetes.docker.internal/
-```
-
-или:
+## Полезные команды
 
 ```bash
-curl http://kubernetes.docker.internal/
+# Состояние кластера
+kubectl get pods,svc,ingress,hpa,pvc
+
+# Метрики подов
+kubectl top pods
+
+# Логи FastAPI
+kubectl logs -l app=url-shortener --tail=50
+
+# Обновить секрет
+kubectl delete secret shortener-secret
+kubectl create secret generic shortener-secret --from-env-file=.env
+kubectl rollout restart deployment/url-shortener
+
+# Нагрузочный тест (HPA)
+hey -z 60s -c 50 -m POST \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/"}' \
+  http://kubernetes.docker.internal/api/shorten
 ```
 
-Маршрут запроса:
+## Конфигурация
 
-`браузер → ingress-nginx (localhost:80) → Ingress web-ingress → Service web-service:80 → Pods web-deployment-... :8080`.
+### ConfigMap (`k8s/configmap.yaml`)
 
----
+| Ключ | Значение | Описание |
+|------|---------|----------|
+| `BASE_URL` | `http://kubernetes.docker.internal` | Базовый URL сервиса |
+| `APP_NAME` | `URL Shortener` | Название приложения |
+| `APP_VERSION` | `1.0.0` | Версия |
 
-## Кратко: роли объектов Kubernetes
+### Secret (из `.env`)
 
-- **Deployment**  
-  Описывает желаемое количество подов и их шаблон (образ, порты, переменные окружения и т.д.) и поддерживает это состояние (3 реплики, rolling update и т.п.).
+| Ключ | Описание |
+|------|----------|
+| `ADMIN_TOKEN` | Токен для admin-эндпоинтов (`X-Admin-Token` header) |
 
-- **Service (ClusterIP)**  
-  Даёт стабильное DNS‑имя и IP внутри кластера и по label’ам находит поды, балансируя трафик между ними.
+## HPA — Автоскейлинг
 
-- **Ingress**  
-  Описывает правила входа HTTP/HTTPS трафика извне: по домену и пути направляет запросы к нужному Service.
+```
+minReplicas: 2    maxReplicas: 6    targetCPUUtilization: 30%
+```
 
----
+Установка metrics-server для Docker Desktop:
 
-## TODO (от простого к более сложному)
+```bash
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+kubectl patch deployment metrics-server -n kube-system \
+  --type "json" \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+```
 
-План дальнейшего развития проекта:
+## Что изучено
 
-1. **Readiness и Liveness Probes**
-   - Добавить `readinessProbe` и `livenessProbe` в `deployment.yaml` (HTTP‑проверки `/health`).
-   - Потренироваться ломать/чинить приложение и смотреть, как k8s его перезапускает.
+- [x] Docker: многослойная сборка, кеширование слоёв, `--no-cache`
+- [x] K8s Deployment: rolling update, selector/labels, imagePullPolicy
+- [x] PVC: персистентное хранилище, ReadWriteOnce
+- [x] ConfigMap vs Secret: несекретные настройки vs токены
+- [x] Readiness/Liveness Probes: защита от трафика на нездоровый под
+- [x] Resources requests/limits: гарантированные и максимальные ресурсы
+- [x] HPA: автоскейлинг по CPU, cooldown period
+- [x] Path-based Ingress: маршрутизация по префиксу пути
+- [x] Порядок маршрутов: конкретные пути до динамических (FastAPI и Ingress)
+- [x] Rolling restart: `kubectl rollout restart` при обновлении ConfigMap/Secret
+- [x] DNS: `/etc/hosts`, DoH, IPv4 vs IPv6, системный DNS
 
-2. **Requests и Limits**
-   - Задать `resources.requests` и `resources.limits` для CPU/памяти.
-   - Посмотреть, как это влияет на планирование pod’ов.
+## TODO
 
-3. **Horizontal Pod Autoscaler (HPA)**
-   - Добавить HPA, который масштабирует Deployment по нагрузке (CPU).  
-   - Смоделировать нагрузку и посмотреть динамику `replicas`.
-
-4. **PersistentVolume / PersistentVolumeClaim**
-   - Добавить PVC и примонтировать его в поды (`/data`).  
-   - Проверить, что данные переживают перезапуск подов.
-
-5. **ConfigMap и Secret**
-   - Вынести конфигурацию (например, сообщения или флаги) в ConfigMap.  
-   - Добавить Secret (например, фейковый API‑ключ) и примонтировать его в окружение контейнера.
-
-6. **Более сложный Ingress**
-   - Добавить второй сервис/endpoint и настроить path‑based routing (`/api`, `/admin` и т.п.).  
-   - Поиграть с хостами и несколькими ingress‑правилами.
-
-7. **Базовый CI/CD**
-   - Добавить GitHub Actions workflow:
-     - сборка Docker‑образа;  
-     - пуш в registry (Docker Hub / GitHub Container Registry);  
-     - деплой в локальный (или удалённый) кластер k8s через `kubectl apply`/`kustomize`.
-
-8. **Monitoring / Logging (опционально)**
-   - Подключить простое логирование и/или метрики (например, через сторонний стек).
+- [ ] Cloudflare Tunnel — публичный доступ к локальному кластеру
+- [ ] CI/CD — GitHub Actions: build → push → deploy
+- [ ] Облачный деплой — DigitalOcean/GKE/Oracle Cloud
+- [ ] PostgreSQL — замена SQLite для multi-node кластера
+- [ ] Monitoring — Prometheus + Grafana

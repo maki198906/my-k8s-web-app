@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shortener-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce   # том монтируется только к одной ноде одновременно
+  resources:
+    requests:
+      storage: 100Mi  # запрашиваем 100 МБ — для SQLite более чем достаточно

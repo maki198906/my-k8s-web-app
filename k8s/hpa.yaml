@@ -1,0 +1,22 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: shortener-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: url-shortener        # ← наш Deployment
+
+  minReplicas: 2               # минимум 2 пода всегда
+  maxReplicas: 6               # максимум 6 подов под нагрузкой
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 30   # цель: держать CPU на уровне 30%
+                                   # низкий порог — чтобы скейлинг
+                                   # сработал быстро на учебном стенде
